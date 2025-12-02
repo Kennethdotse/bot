@@ -11,6 +11,7 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
+BOT_TOKEN =  "8441976738:AAG6eSUr1cq21oPohek_rUT9yQAZGjzzq9g"
 
 # --- Ensure folders exist ---
 os.makedirs("audio", exist_ok=True)
