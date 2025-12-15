@@ -1,4 +1,4 @@
-# standard_speech_bot.py
+# standard_speech_bot_vercel.py
 import logging
 import random
 import json
@@ -6,7 +6,7 @@ import csv
 import os
 from datetime import datetime
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Voice
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Voice, Bot
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -15,17 +15,19 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from fastapi import FastAPI, Request
+import uvicorn
 
 # --- Logging ---
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
-# --- Token ---
+# --- Load Token ---
 load_dotenv()
 BOT_TOKEN = os.getenv("STANDARD_BOT_TOKEN")
 if not BOT_TOKEN:
-    raise RuntimeError("Missing BOT_TOKEN in .env")
+    raise RuntimeError("Missing STANDARD_BOT_TOKEN in .env")
 
 # --- Storage folders ---
 os.makedirs("audio", exist_ok=True)
@@ -39,8 +41,9 @@ user_has_consented = {}
 user_metadata = {}
 user_prompts = {}
 user_prompt_index = {}
-user_temp_voice = {} 
+user_temp_voice = {}
 
+# --- Prompts ---
 STANDARD_CODE_SWITCHED_PROMPTS = [
     "Mepɛ sɛ me kɔ town later",
     "Hwɛ, I told you not to do that.",
@@ -188,6 +191,7 @@ STANDARD_CODE_SWITCHED_PROMPTS = [
     "Da bɛn na wobɛba? Thursday?"
 
 ]
+
 # --- Helpers ---
 def user_audio_dir(user_id: int):
     d = os.path.join("audio", str(user_id))
@@ -200,14 +204,12 @@ def save_master_csv_entry(user_id: int, entry: dict):
 
     with open(master_csv, "a", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
-
         if not exists:
             writer.writerow([
                 "user_id", "timestamp", "consent",
                 "age_range", "speech_type",
                 "file_name", "prompt"
             ])
-
         writer.writerow([
             user_id,
             entry["timestamp"],
@@ -224,11 +226,10 @@ def save_user_jsonl(user_id: int):
         json.dump({"user_id": user_id, **user_metadata[user_id]}, f, indent=2)
         f.write("\n")
 
-# --- Start ---
+# --- Telegram Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
-    # RESET user state every time they restart
     user_has_consented[user_id] = False
     user_metadata[user_id] = {
         "consent": False,
@@ -252,41 +253,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Do you agree to participate?"
     )
 
-
-
     buttons = [
-        [
-            InlineKeyboardButton("✅ Yes", callback_data="consent_yes"),
-            InlineKeyboardButton("❌ No", callback_data="consent_no"),
-        ]
+        [InlineKeyboardButton("✅ Yes", callback_data="consent_yes"),
+         InlineKeyboardButton("❌ No", callback_data="consent_no")]
     ]
 
     await update.message.reply_text(consent_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
 
-
-# --- /restart command ---
 async def restart_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
-    # Generate new prompts (same as session_rerecord)
     prompts = random.sample(
         STANDARD_CODE_SWITCHED_PROMPTS,
         min(len(STANDARD_CODE_SWITCHED_PROMPTS), STANDARD_MAX_PROMPTS)
     )
     user_prompts[user_id] = prompts
     user_prompt_index[user_id] = 0
-
     await update.message.reply_text("🔄 Starting a new recording session!")
     await send_standard_prompt(update.message, user_id)
 
-
-# --- /end command ---
 async def end_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "We appreciate your time. See you soon for another session☺"
     )
-
-
 
 # --- Button Handler ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -295,18 +283,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     data = query.data
 
-    # CONSENT
+    # Handle consent
     if data in ["consent_yes", "consent_no"]:
         if data == "consent_no":
-            await query.edit_message_text("Thank you so much for your time☺.")
+            await query.edit_message_text("Thank you for your time☺.")
             return
-
-        # user consented
         user_has_consented[user_id] = True
         user_metadata[user_id]["consent"] = True
         await query.edit_message_text("Thank you for consenting! 👍")
 
-        # Ask age
         age_buttons = [
             InlineKeyboardButton("<18", callback_data="age_<18"),
             InlineKeyboardButton("18-24", callback_data="age_18-24"),
@@ -314,39 +299,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("35-44", callback_data="age_35-44"),
             InlineKeyboardButton("45+", callback_data="age_45+"),
         ]
-
         await query.message.reply_text(
             "Please select your age range:",
             reply_markup=InlineKeyboardMarkup([age_buttons])
         )
         return
 
-    # AGE selection
     if data.startswith("age_"):
         age = data.split("_")[1]
         user_metadata[user_id]["age_range"] = age
         await query.edit_message_text(f"Age selected: {age}")
 
-        # Now prepare random prompts
         prompts = random.sample(
             STANDARD_CODE_SWITCHED_PROMPTS,
             min(len(STANDARD_CODE_SWITCHED_PROMPTS), STANDARD_MAX_PROMPTS)
         )
         user_prompts[user_id] = prompts
         user_prompt_index[user_id] = 0
-
         await send_standard_prompt(query.message, user_id)
         return
 
-    # --- TEMPORARY VOICE OPTIONS ---
+    # Temporary voice handling
     if data.startswith("voice_"):
         action = data.split("_")[1]
         temp_file_info = user_temp_voice.get(user_id)
-
         if not temp_file_info:
             await query.edit_message_text("⚠️ No pending recording found. Send a new voice note.")
             return
-
         file_path = temp_file_info["file_path"]
         file_name = temp_file_info["file_name"]
         prompt_text = temp_file_info["prompt"]
@@ -363,37 +342,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_metadata[user_id]["recordings"].append(entry)
             save_master_csv_entry(user_id, entry)
             save_user_jsonl(user_id)
-
             user_temp_voice[user_id] = None
             await query.edit_message_text(f"✅ Recording saved: `{file_name}`", parse_mode="Markdown")
-
-            # Move to next prompt
             user_prompt_index[user_id] += 1
             await send_standard_prompt(query.message, user_id)
 
         elif action == "rerecord":
-            # Delete previous temp file
             if os.path.exists(file_path):
                 os.remove(file_path)
             user_temp_voice[user_id] = None
             await query.edit_message_text("♻️ Please re-record the prompt now.")
 
         elif action == "change":
-            # Delete previous temp file
             if os.path.exists(file_path):
                 os.remove(file_path)
             user_temp_voice[user_id] = None
-
-            # Keep the same prompt but just ask them to record again
             await query.edit_message_text("🔄 Prompt changed. Please record the new prompt now.")
             await send_standard_prompt(query.message, user_id)
 
-    # --- POST SESSION OPTIONS ---
     if data.startswith("session_"):
         action = data.split("_")[1]
-
         if action == "rerecord":
-            # New set of prompts, keep consent/age
             prompts = random.sample(
                 STANDARD_CODE_SWITCHED_PROMPTS,
                 min(len(STANDARD_CODE_SWITCHED_PROMPTS), STANDARD_MAX_PROMPTS)
@@ -401,7 +370,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_prompts[user_id] = prompts
             user_prompt_index[user_id] = 0
             await send_standard_prompt(query.message, user_id)
-
         elif action == "end":
             await query.edit_message_text(
                 "We appreciate your time. See you soon for another session☺"
@@ -413,7 +381,6 @@ async def send_standard_prompt(context_object, user_id: int):
     prompts = user_prompts[user_id]
 
     if idx >= len(prompts):
-        # Offer post-session options
         buttons = [
             [
                 InlineKeyboardButton("🎤 Record Again", callback_data="session_rerecord"),
@@ -464,14 +431,12 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_path = os.path.join(audio_dir, file_name)
     await file.download_to_drive(file_path)
 
-    # Store temporarily until user chooses Save / Re-record
     user_temp_voice[user_id] = {
         "file_path": file_path,
         "file_name": file_name,
         "prompt": prompt_text
     }
 
-    # Offer buttons to save or re-record
     buttons = [
         [
             InlineKeyboardButton("💾 Save", callback_data="voice_save"),
@@ -479,24 +444,39 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("🔄 Change Prompt", callback_data="voice_change")
         ]
     ]
-    
+
     await update.message.reply_text(
         f"🎤 You sent a recording for:\n{prompt_text}\n\nChoose an action:",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
-# --- Main ---
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+# --- FastAPI for Vercel ---
+app = FastAPI()
+bot = Bot(token=BOT_TOKEN)
+application = ApplicationBuilder().bot(bot).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("restart", restart_session))
-    app.add_handler(CommandHandler("end", end_session))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.VOICE, voice_handler))
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CommandHandler("restart", restart_session))
+application.add_handler(CommandHandler("end", end_session))
+application.add_handler(CallbackQueryHandler(button_handler))
+application.add_handler(MessageHandler(filters.VOICE, voice_handler))
 
-    print("Standard Speech Bot running...")
-    app.run_polling()
+@app.post(f"/{BOT_TOKEN}")
+async def telegram_webhook(request: Request):
+    """Handle incoming updates from Telegram"""
+    update = Update.de_json(await request.json(), bot)
+    await application.update_queue.put(update)
+    return {"ok": True}
 
-if __name__ == "__main__":
-    main()
+@app.get("/")
+def index():
+    return "Standard Speech Bot is running on Vercel!"
+
+# --- Set webhook on startup ---
+async def on_startup():
+    webhook_url = os.getenv("WEBHOOK_URL")  # your deployed URL
+    await bot.set_webhook(f"{webhook_url}/{BOT_TOKEN}")
+
+@app.on_event("startup")
+async def startup_event():
+    await on_startup()
