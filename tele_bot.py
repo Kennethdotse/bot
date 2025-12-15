@@ -1,233 +1,502 @@
+# standard_speech_bot.py
 import logging
 import random
 import json
 import csv
 import os
+from datetime import datetime
+from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Voice
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
-# --- Setup Logging ---
+# --- Logging ---
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
-BOT_TOKEN =  "8441976738:AAG6eSUr1cq21oPohek_rUT9yQAZGjzzq9g"
+# --- Token ---
+load_dotenv()
+BOT_TOKEN = os.getenv("STANDARD_BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("Missing BOT_TOKEN in .env")
 
-# --- Ensure folders exist ---
+# --- Storage folders ---
 os.makedirs("audio", exist_ok=True)
 os.makedirs("metadata", exist_ok=True)
 
-# --- User Data Storage ---
-user_metadata = {}      # Stores age, severity, origin, recordings
-user_prompts = {}       # Randomized prompts per user
-user_prompt_index = {}  # Tracks current prompt index
-TOTAL_RECORDINGS = 9
+# --- Constants ---
+STANDARD_MAX_PROMPTS = 5
 
-# --- Prompts ---
-NORMAL_PROMPTS = [
-    "The sun rises in the east and sets in the west.",
-    "Please give me the water.",
-    "I like to eat mangoes every morning.",
-    "My friend plays football at school.",
-    "The cat is sitting on the red mat.",
-    "I am going to the market to buy yam and rice.",
-    "She sings beautifully under the mango tree.",
-    "Today is a bright sunny day in Kumasi.",
-    "The baby is sleeping."
+# --- State dictionaries ---
+user_has_consented = {}
+user_metadata = {}
+user_prompts = {}
+user_prompt_index = {}
+user_temp_voice = {} 
+
+STANDARD_CODE_SWITCHED_PROMPTS = [
+    "Mepɛ sɛ me kɔ town later",
+    "Hwɛ, I told you not to do that.",
+    "Wobɛ ba anɔpa? Let me know early.",
+    "He's not nice at all, me bo afu.",
+    "Mabrɛ oo, today’s work was too much.",
+    "Ɛnyɛ easy o, but we move.",
+    "Kɔtɔ no wɔ hɔ? I want to buy some.",
+    "Ne ho yɛ me fɛ, I like him.",
+    "Wo pɛ dɛn? Tell me what you want.",
+    "I’m hungry paa, yɛnkɔ didi.",
+    "M’ani agye paao, congratulations!.",
+    "I’m coming ankasa, give me 5 minutes.",
+    "Wo nim sɛ I almost forgot to buy the food?",
+    "Me nsa aka, I’m tired.",
+    "Ɛyɛ fɛ, I really like this.",
+    "Me kɔ aba, wait for me here.",
+    "Ɛhe na wokɔ? When will you even come?",
+    "Me nte ase, explain again.",
+    "Ɛyɛ den oo, but I’ll try.",
+    "Wobɛyɛ late o, hurry up.",
+    "My entire body yɛ me ya paa.",
+    "Ɛyɛ me sɛ he's back.",
+    "Mepɛ nanso I’m shy small.",
+    "Ɛyɛ okay, don’t worry.",
+    "Ɛyɛ me nwanwa, I didn’t expect this.",
+    "Mmonka mo ho, we are running late.",
+    "Menni sika, can you lend me 50 cedis?",
+    "Ɛyɛ a na woafrɛ me, I will be waiting.",
+    "Wose sɛn? I didn't hear what you said.",
+    "Chale, I am leaving, yɛbɛhyia.",
+    "M’ani kum, I need to sleep early today.",
+    "Woadi lunch? Let's go and eat.",
+    "Hwɛ yie, that place is dangerous.",
+    "Mepɛ sɛ me kɔ, are you ready to leave?",
+    "Ɛnkyɛ koraa, I will be done in 5 minutes.",
+
+    "Ka kyerɛ no sɛ, the meeting has been moved.",
+    "Gyae dede no, I am trying to focus.",
+    "Fa to hɔ, yeah.",
+    "Kɔ fa bra, I need it right now.",
+    "Boa me, this code is not working.",
+    "Mabrɛ, I need a vacation urgently.",
+    "W’ani agye? That’s nice.",
+
+    "Nsuo ɛtɔ, help me bring the things inside.",
+    "Network no yɛ slow, I can't send the file.",
+    "Car no wɔ hen? I have been standing here long.",
+    "Ɛnyɛ easy o, the traffic was terrible.",
+    "Woama me kɔn adɔ, now I want fufu.",
+    "Bra ha, come and look at this error.",
+    "Sɛ wopɛ a, you can join us later.",
+    "Mempɛ saa, please change it for me.",
+
+    "Mepakyew, pass me the book.",
+    "Meeba sesiaa, we will discuss bebiaa.",
+    "He is tired nti he will rest kakraa.",
+    "ɛkom di me, let's eat jollof rice.",
+    "Yɛnkɔ shopping for clothes later.",
+    "I will call you akyire wai.",
+    "She is coming o, sɛ wo bɛba.",
+
+    "Wofiri henfa? I have been looking for you.",
+    "Mente aseɛ, can you explain that again?",
+    "Ɛyɛ dɛ papa, where did you buy it?",
+    "Yɛbɛhyia okyena, around 2 PM.",
+    "Mma wo werɛ mfi, everything will be fine.",
+    "Watɔ aduane no? I am starving here.",
+    "Chale, the traffic is too much, but meeba",
+    "Wo ho te sɛn? Hope everything is cool.",
+    "Fa bra and bring the laptop along.",
+    "Adɛn nti na woyɛ dede like that?",
+    "Meekɔ fie, see you later.",
+    "Sɛ wowie a, call me immediately.",
+    "Obiara nni hɔ o. The place is empty.",
+    "Mepa wo kyew, give me some water.",
+    "Ɛnyɛ hwee, don't worry about it.",
+    "Wopɛ sɛ yɛkɔ cinema anaa? I heard there is a new movie.",
+    "Mekɔ bank akɔ withdraw sika.",
+
+    "Sende me MoMo, I need it now.",
+    "Wanya alert no? I sent it five minutes ago.",
+    "Menni cash, can I pay with my phone?",
+    "Meetwɛn sika no, my money is finished.",
+    "Sika no sua, please add 20 cedis.",
+    "Wobɛtumi asende me airtime? Me credit asa.",
+    "Gye wo sika, keep the change.",
+    "Mepɛ sɛ me withdraw sika, is the network working?",
+    "Ɛyɛ too much, reduce the price.",
+    "Wɔaka akyerɛ wo sɛ the payment didn't go through?",
+
+    "Si me wɔ junction no so, I will walk from there.",
+    "Driver, mepakyew, slow down, kwan no nyɛ.",
+    "Ma te but give me my change.",
+    "Traffic wei deɛ, we will be late.",
+    "Wopɛ Uber anaa? It is faster than trotro.",
+    "Kyerɛ me kwan no, I am lost.",
+    "Kɔ w’anim kakra, na fa left.",
+    "Y’aduru, start parking the car.",
+    "Kwan no nyɛ, the road is very bad here.",
+    "Wote henfa? Sendi wo location mame.",
+
+    "Me phone awu, do you have a charger?",
+    "Mia button no, the red one on the left.",
+    "Network no yɛ slow, I can't download the file.",
+    "Sɛ wowie a, send me the link via WhatsApp.",
+    "Laptop no ayɛ hye dodo, turn it off.",
+    "Wobɛtumi a-install saa app no ama me?",
+    "Password no yɛ incorrect, try again.",
+    "Mente wo voice, your microphone is muted.",
+    "Fa picture no to status, everyone will see it.",
+    "Checki wo email, I sent the report.",
+
+    "Bɔdeɛ no yɛ sɛn? Give me three fingers.",
+    "Mempɛ nneɛma a onions wɔ mu, I really don't like onions.",
+    "Adɛn nti na fufuo no yɛ hard saa?",
+    "Tɔ nsuo bra, the one in the bottle.",
+    "Yɛnkɔ, I know a good place we can eat.",
+    "Rice no aben?",
+    "Meekɔ market kɔtɔ nneɛma, do you need anything?",
+    "Anka mepɛ waakye, but it is finished.",
+    "Fa mako kakra gu so, make it spicy.",
+    "Wowei a, wash the plates.",
+
+    "Me ti pae me, I need para.",
+    "M’ani agye ama wo, congratulations!",
+    "Gyae ntorɔ nu, tell me the truth.",
+    "Wo ho mfa wo? You look sick.",
+    "Mepɛ asɛm no atie, it sounds very interesting.",
+    "Mabrɛ dodo, I cannot walk anymore.",
+    "Fa kyɛ me, please. It was a mistake.",
+    "Ɛyɛ a suro nu, be careful with him.",
+    "Wo bo afu? Why are you quiet?",
+    "Mepakyew, boa me, it is an emergency.",
+
+    "Yɛbɛhyia ɔkyena anɔpa, don't be late.",
+    "Ennɛ yɛ what date? I have lost track.",
+    "Maba ha dadaada, where were you?.",
+    "Ɛnnɛ anwummerɛ, we have a meeting.",
+    "Wobɛkɔ time bɛn? We need to talk before you leave?",
+    "Mame me time kakra, I am almost done.",
+    "Yɛ startii 2 o'clock, you are late.",
+    "Ɛnkyɛ koraa, just give me a moment.",
+    "Mekɔ aba seesei ara, wait for me.",
+    "Da bɛn na wobɛba? Thursday?"
+
 ]
+# --- Helpers ---
+def user_audio_dir(user_id: int):
+    d = os.path.join("audio", str(user_id))
+    os.makedirs(d, exist_ok=True)
+    return d
 
-CODE_SWITCHED_PROMPTS = [
-    "mepakyew take the book from the table.",
-    "I will meet you akyire wai, we go talk.",
-    "He said he is tired nti he will rest.",
-    "Abeg, can you help me with this work?",
-    "I am hungry oo, let's eat jollof rice.",
-    "Ny3nkor shopping for clothes later.",
-    "m3 fr3wu after church service wai.",
-    "She is coming with her friends, you know dada."
-]
+def save_master_csv_entry(user_id: int, entry: dict):
+    master_csv = os.path.join("metadata", "master.csv")
+    exists = os.path.exists(master_csv)
 
-LOCAL_LANGUAGE_PROMPTS = [
-    "Ɛyɛ anɔpa pa wɔ Kumasi.",
-    "Me pɛ sɛ me kɔ guare.",
-    "Ɔba no da wɔ fie.",
-    "Yɛrekɔ adwuma nnɛ.",
-    "Meka akyire kyerɛ no."
-]
+    with open(master_csv, "a", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
 
-# --- Start Command ---
+        if not exists:
+            writer.writerow([
+                "user_id", "timestamp", "consent",
+                "age_range", "speech_type",
+                "file_name", "prompt"
+            ])
+
+        writer.writerow([
+            user_id,
+            entry["timestamp"],
+            entry["consent"],
+            entry["age_range"],
+            entry["speech_type"],
+            entry["file_name"],
+            entry["prompt"],
+        ])
+
+def save_user_jsonl(user_id: int):
+    path = os.path.join("metadata", f"{user_id}.jsonl")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"user_id": user_id, **user_metadata[user_id]}, f, indent=2)
+        f.write("\n")
+
+# --- Start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+
+    # RESET user state every time they restart
+    user_has_consented[user_id] = False
     user_metadata[user_id] = {
+        "consent": False,
         "age_range": None,
-        "speech_severity": None,
-        "origin": None,
+        "speech_type": "standard",
         "recordings": []
     }
+    user_prompts[user_id] = []
+    user_prompt_index[user_id] = 0
+    user_temp_voice[user_id] = None
 
-    user_prompts[user_id] = (
-        random.sample(NORMAL_PROMPTS, 3) +
-        random.sample(CODE_SWITCHED_PROMPTS, 3) +
-        random.sample(LOCAL_LANGUAGE_PROMPTS, 2)
+    consent_text = (
+        "📝 *Project Kasa — Consent to Participate*\n\n"
+        "This bot records short code-switched speech samples "
+        "(e.g., *“Mepɛ sɛ me kɔ town later”*) to improve speech recognition.\n\n"
+        "Your participation is voluntary and you may stop at any time.\n\n"
+        "You will:\n"
+        "1. Give consent and select your age\n"
+        "2. Record five short code-switched prompts\n\n"
+        "All recordings are anonymous and used only for research.\n\n"
+        "Do you agree to participate?"
     )
-    random.shuffle(user_prompts[user_id])
+
+
+
+    buttons = [
+        [
+            InlineKeyboardButton("✅ Yes", callback_data="consent_yes"),
+            InlineKeyboardButton("❌ No", callback_data="consent_no"),
+        ]
+    ]
+
+    await update.message.reply_text(consent_text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+
+
+# --- /restart command ---
+async def restart_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+
+    # Generate new prompts (same as session_rerecord)
+    prompts = random.sample(
+        STANDARD_CODE_SWITCHED_PROMPTS,
+        min(len(STANDARD_CODE_SWITCHED_PROMPTS), STANDARD_MAX_PROMPTS)
+    )
+    user_prompts[user_id] = prompts
     user_prompt_index[user_id] = 0
 
-    welcome_text = (
-        "👋 Welcome to Project Kasa!\n\n"
-        "This project collects voice recordings to improve speech recognition for African speakers.\n"
-        "You will record a few short sentences. Each recording helps us understand speech patterns better.\n\n"
-        "Let's start with your age range:"
+    await update.message.reply_text("🔄 Starting a new recording session!")
+    await send_standard_prompt(update.message, user_id)
+
+
+# --- /end command ---
+async def end_session(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "We appreciate your time. See you soon for another session☺"
     )
 
-    age_buttons = [
-        InlineKeyboardButton("<18", callback_data="age_<18"),
-        InlineKeyboardButton("18-24", callback_data="age_18-24"),
-        InlineKeyboardButton("25-34", callback_data="age_25-34"),
-        InlineKeyboardButton("35-44", callback_data="age_35-44"),
-        InlineKeyboardButton("45+", callback_data="age_45+")
-    ]
-    reply_markup = InlineKeyboardMarkup([age_buttons])
-    await update.message.reply_text(welcome_text, reply_markup=reply_markup)
 
-# --- Button Callback ---
+
+# --- Button Handler ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     data = query.data
 
-    # Age
-    if data.startswith("age_"):
-        user_metadata[user_id]["age_range"] = data.split("_")[1]
+    # CONSENT
+    if data in ["consent_yes", "consent_no"]:
+        if data == "consent_no":
+            await query.edit_message_text("Thank you so much for your time☺.")
+            return
 
-        severity_buttons = [
-            InlineKeyboardButton("Stammer", callback_data="severity_stammer"),
-            InlineKeyboardButton("Stroke", callback_data="severity_stroke"),
-            InlineKeyboardButton("Cerebral Palsy", callback_data="severity_cerebral"),
-            InlineKeyboardButton("Parkinson's disease", callback_data="severity_parkinson")
+        # user consented
+        user_has_consented[user_id] = True
+        user_metadata[user_id]["consent"] = True
+        await query.edit_message_text("Thank you for consenting! 👍")
+
+        # Ask age
+        age_buttons = [
+            InlineKeyboardButton("<18", callback_data="age_<18"),
+            InlineKeyboardButton("18-24", callback_data="age_18-24"),
+            InlineKeyboardButton("25-34", callback_data="age_25-34"),
+            InlineKeyboardButton("35-44", callback_data="age_35-44"),
+            InlineKeyboardButton("45+", callback_data="age_45+"),
         ]
-        reply_markup = InlineKeyboardMarkup([severity_buttons])
-        await query.edit_message_text(
-            f"✅ Age selected: {user_metadata[user_id]['age_range']}\nSelect your speech severity:",
-            reply_markup=reply_markup
+
+        await query.message.reply_text(
+            "Please select your age range:",
+            reply_markup=InlineKeyboardMarkup([age_buttons])
         )
-
-    # Severity
-    elif data.startswith("severity_"):
-        severity_map = {
-            "severity_stammer": "Stammer",
-            "severity_stroke": "Stroke",
-            "severity_cerebral": "Cerebral Palsy",
-            "severity_parkinson": "Parkinson"
-        }
-        user_metadata[user_id]["speech_severity"] = severity_map.get(data, "Unknown")
-
-        origin_buttons = [
-            InlineKeyboardButton("Kumasi", callback_data="region_kumasi"),
-            InlineKeyboardButton("Accra", callback_data="region_accra"),
-            InlineKeyboardButton("Volta", callback_data="region_volta"),
-            InlineKeyboardButton("North", callback_data="region_north")
-        ]
-        reply_markup = InlineKeyboardMarkup([origin_buttons])
-        await query.edit_message_text(
-            f"✅ Severity selected: {user_metadata[user_id]['speech_severity']}\nSelect your region of origin:",
-            reply_markup=reply_markup
-        )
-
-    # Region
-    elif data.startswith("region_"):
-        region_map = {
-            "region_kumasi": "Kumasi",
-            "region_accra": "Accra",
-            "region_volta": "Volta",
-            "region_north": "North"
-        }
-        user_metadata[user_id]["origin"] = region_map.get(data, "Unknown")
-        await send_prompt(query, user_id)
-
-# --- Send Prompt ---
-async def send_prompt(context_object, user_id):
-    idx = user_prompt_index[user_id]
-    if idx >= TOTAL_RECORDINGS:
-        text = "🎉 You have completed all recordings! Thank you for participating. ⭐"
-        if hasattr(context_object, "edit_message_text"):
-            await context_object.edit_message_text(text)
-        else:
-            await context_object.reply_text(text)
-        save_metadata()
         return
 
-    prompt_text = user_prompts[user_id][idx]
-    if prompt_text in CODE_SWITCHED_PROMPTS:
-        user_metadata[user_id]["current_prompt_type"] = "code_switched"
-    elif prompt_text in LOCAL_LANGUAGE_PROMPTS:
-        user_metadata[user_id]["current_prompt_type"] = "local"
-    else:
-        user_metadata[user_id]["current_prompt_type"] = "normal"
+    # AGE selection
+    if data.startswith("age_"):
+        age = data.split("_")[1]
+        user_metadata[user_id]["age_range"] = age
+        await query.edit_message_text(f"Age selected: {age}")
 
-    progress_bar = "⭐" * idx + "☆" * (TOTAL_RECORDINGS - idx)
-    text = f"🎤 Prompt {idx + 1}/{TOTAL_RECORDINGS}:\n\n{prompt_text}\n\nProgress: {progress_bar}\nSend your voice message!"
+        # Now prepare random prompts
+        prompts = random.sample(
+            STANDARD_CODE_SWITCHED_PROMPTS,
+            min(len(STANDARD_CODE_SWITCHED_PROMPTS), STANDARD_MAX_PROMPTS)
+        )
+        user_prompts[user_id] = prompts
+        user_prompt_index[user_id] = 0
 
-    if hasattr(context_object, "edit_message_text"):
-        await context_object.edit_message_text(text)
-    else:
-        await context_object.reply_text(text)
+        await send_standard_prompt(query.message, user_id)
+        return
+
+    # --- TEMPORARY VOICE OPTIONS ---
+    if data.startswith("voice_"):
+        action = data.split("_")[1]
+        temp_file_info = user_temp_voice.get(user_id)
+
+        if not temp_file_info:
+            await query.edit_message_text("⚠️ No pending recording found. Send a new voice note.")
+            return
+
+        file_path = temp_file_info["file_path"]
+        file_name = temp_file_info["file_name"]
+        prompt_text = temp_file_info["prompt"]
+
+        if action == "save":
+            entry = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "file_name": file_name,
+                "prompt": prompt_text,
+                "age_range": user_metadata[user_id]["age_range"],
+                "speech_type": "standard",
+                "consent": True
+            }
+            user_metadata[user_id]["recordings"].append(entry)
+            save_master_csv_entry(user_id, entry)
+            save_user_jsonl(user_id)
+
+            user_temp_voice[user_id] = None
+            await query.edit_message_text(f"✅ Recording saved: `{file_name}`", parse_mode="Markdown")
+
+            # Move to next prompt
+            user_prompt_index[user_id] += 1
+            await send_standard_prompt(query.message, user_id)
+
+        elif action == "rerecord":
+            # Delete previous temp file
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            user_temp_voice[user_id] = None
+            await query.edit_message_text("♻️ Please re-record the prompt now.")
+
+        elif action == "change":
+            # Delete previous temp file
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            user_temp_voice[user_id] = None
+
+            # Keep the same prompt but just ask them to record again
+            await query.edit_message_text("🔄 Prompt changed. Please record the new prompt now.")
+            await send_standard_prompt(query.message, user_id)
+
+    # --- POST SESSION OPTIONS ---
+    if data.startswith("session_"):
+        action = data.split("_")[1]
+
+        if action == "rerecord":
+            # New set of prompts, keep consent/age
+            prompts = random.sample(
+                STANDARD_CODE_SWITCHED_PROMPTS,
+                min(len(STANDARD_CODE_SWITCHED_PROMPTS), STANDARD_MAX_PROMPTS)
+            )
+            user_prompts[user_id] = prompts
+            user_prompt_index[user_id] = 0
+            await send_standard_prompt(query.message, user_id)
+
+        elif action == "end":
+            await query.edit_message_text(
+                "We appreciate your time. See you soon for another session☺"
+            )
+
+# --- Send Standard Prompt ---
+async def send_standard_prompt(context_object, user_id: int):
+    idx = user_prompt_index[user_id]
+    prompts = user_prompts[user_id]
+
+    if idx >= len(prompts):
+        # Offer post-session options
+        buttons = [
+            [
+                InlineKeyboardButton("🎤 Record Again", callback_data="session_rerecord"),
+                InlineKeyboardButton("👋 End Session", callback_data="session_end")
+            ]
+        ]
+        await context_object.reply_text(
+            "🎉 You have completed all recordings!\n\n"
+            "Would you like to record another set or end the session?",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        save_user_jsonl(user_id)
+        return
+
+    prompt_text = prompts[idx]
+    stars = "⭐" * idx + "☆" * (len(prompts) - idx)
+    user_metadata[user_id]["current_prompt"] = prompt_text
+
+    await context_object.reply_text(
+        f"🎤 *Prompt {idx+1}/{len(prompts)}*\n\n"
+        f"{prompt_text}\n\n"
+        f"Progress: {stars}\n"
+        f"Send your voice note now.",
+        parse_mode="Markdown"
+    )
 
 # --- Voice Handler ---
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id not in user_metadata:
-        await update.message.reply_text("Please start with /start first.")
+
+    if not user_has_consented.get(user_id, False):
+        await update.message.reply_text("Please start with /start and provide consent.")
         return
 
     voice: Voice = update.message.voice
+    if not voice:
+        await update.message.reply_text("Please send a real voice note.")
+        return
+
     file = await voice.get_file()
-    file_name = f"{user_id}_{user_prompt_index[user_id]+1}.ogg"
-    file_path = os.path.join("audio", file_name)
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    audio_dir = user_audio_dir(user_id)
+
+    idx = user_prompt_index[user_id]
+    prompt_text = user_prompts[user_id][idx]
+
+    file_name = f"{user_id}_std_{idx+1}_{ts}.ogg"
+    file_path = os.path.join(audio_dir, file_name)
     await file.download_to_drive(file_path)
 
-    recording_entry = {
+    # Store temporarily until user chooses Save / Re-record
+    user_temp_voice[user_id] = {
+        "file_path": file_path,
         "file_name": file_name,
-        "prompt": user_prompts[user_id][user_prompt_index[user_id]],
-        "prompt_type": user_metadata[user_id]["current_prompt_type"]
+        "prompt": prompt_text
     }
-    user_metadata[user_id]["recordings"].append(recording_entry)
 
-    user_prompt_index[user_id] += 1
-    await send_prompt(update.message, user_id)
-
-# --- Save Metadata ---
-def save_metadata():
-    jsonl_file = os.path.join("metadata", "metadata.jsonl")
-    csv_file = os.path.join("metadata", "metadata.csv")
-
-    # JSONL
-    with open(jsonl_file, "w", encoding="utf-8") as f:
-        for uid, data in user_metadata.items():
-            json.dump({"user_id": uid, **data}, f, ensure_ascii=False)
-            f.write("\n")
-
-    # CSV
-    with open(csv_file, "w", encoding="utf-8", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["user_id", "age_range", "speech_severity", "origin", "file_name", "prompt", "prompt_type"])
-        for uid, data in user_metadata.items():
-            for rec in data["recordings"]:
-                writer.writerow([
-                    uid,
-                    data["age_range"],
-                    data["speech_severity"],
-                    data["origin"],
-                    rec["file_name"],
-                    rec["prompt"],
-                    rec["prompt_type"]
-                ])
+    # Offer buttons to save or re-record
+    buttons = [
+        [
+            InlineKeyboardButton("💾 Save", callback_data="voice_save"),
+            InlineKeyboardButton("♻️ Re-record", callback_data="voice_rerecord"),
+            InlineKeyboardButton("🔄 Change Prompt", callback_data="voice_change")
+        ]
+    ]
+    
+    await update.message.reply_text(
+        f"🎤 You sent a recording for:\n{prompt_text}\n\nChoose an action:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
 # --- Main ---
-if __name__ == "__main__":
+def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("restart", restart_session))
+    app.add_handler(CommandHandler("end", end_session))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.VOICE, voice_handler))
+
+    print("Standard Speech Bot running...")
     app.run_polling()
+
+if __name__ == "__main__":
+    main()
