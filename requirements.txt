@@ -1,9 +1,3 @@
-logging
-random
-telegram
-json
-csv
-datetime
-dotenv
-uvicorn
-fastapi
+python-telegram-bot==20.3
+python-dotenv==1.0.0
+Flask==2.3.2
