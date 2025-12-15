@@ -1,7 +1,7 @@
 {
   "version": 2,
   "functions": {
-    "api/bot.py": {
+    "api/*.py": {
       "runtime": "python3.11"
     }
   }
