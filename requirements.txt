@@ -1,7 +1,9 @@
 logging
 random
+telegram
 json
 csv
 datetime
 dotenv
-telegram
+uvicorn
+fastapi
